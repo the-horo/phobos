@@ -1050,54 +1050,84 @@ private Pid spawnProcessPosix(scope const(char[])[] args,
 
                 static if (!__traits(compiles, closefrom))
                 {
-                    // FIXME: This implementation crashes the system when RLIMIT_NOFILE
-                    // has a big value. For a possible solution see:
-                    // https://github.com/dlang/phobos/pull/8990
                     void fallback (int lowfd) {
-                        // NOTE: malloc() and getrlimit() are not on the POSIX async
-                        // signal safe functions list, but practically this should
-                        // not be a problem. Java VM and CPython also use malloc()
-                        // in its own implementation via opendir().
-                        import core.stdc.stdlib : malloc;
-                        import core.sys.posix.poll : pollfd, poll, POLLNVAL;
-                        import core.sys.posix.sys.resource : rlimit, getrlimit, RLIMIT_NOFILE;
+                        import core.sys.posix.dirent : dirent, opendir, readdir, closedir, DIR;
+                        import core.sys.posix.unistd : close;
+                        import core.sys.posix.stdlib : atoi, malloc, free;
 
-                        // Get the maximum number of file descriptors that could be open.
-                        rlimit r;
-                        if (getrlimit(RLIMIT_NOFILE, &r) != 0)
-                        {
-                            abortOnError(forkPipeOut, InternalError.getrlimit, .errno);
-                        }
-                        immutable maxDescriptors = cast(int) r.rlim_cur;
+                        // Missing druntime declaration
+                        pragma(mangle, "dirfd")
+                        extern(C) nothrow @nogc int dirfd(DIR* dir);
 
-                        immutable maxToClose = maxDescriptors - lowfd;
+                        // Try to open the directory /dev/fd or /proc/self/fd
+                        DIR* dir = opendir("/dev/fd");
+                        if (dir is null) dir = opendir("/proc/self/fd");
 
-                        // Call poll() to see which ones are actually open:
-                        auto pfds = cast(pollfd*) malloc(pollfd.sizeof * maxToClose);
-                        if (pfds is null)
+                        if (dir)
                         {
-                            abortOnError(forkPipeOut, InternalError.malloc, .errno);
-                        }
-                        foreach (i; 0 .. maxToClose)
-                        {
-                            pfds[i].fd = i + lowfd;
-                            pfds[i].events = 0;
-                            pfds[i].revents = 0;
-                        }
-                        if (poll(pfds, maxToClose, 0) >= 0)
-                        {
-                            foreach (i; 0 .. maxToClose)
+                            scope(exit) closedir(dir);
+
+                            int opendirfd = dirfd(dir);
+
+                            // Iterate over all file descriptors
+                            while(true)
                             {
-                                // POLLNVAL will be set if the file descriptor is invalid.
-                                if (!(pfds[i].revents & POLLNVAL)) close(pfds[i].fd);
+                                dirent* entry = readdir(dir);
+
+                                if (entry is null) break;
+                                if (entry.d_name[0] == '.') continue;
+
+                                int fd = atoi(cast(char*)entry.d_name);
+
+                                if (fd != opendirfd && fd >= lowfd) close(fd);
                             }
                         }
-                        else
+                        else // Fallback
                         {
-                            // Fall back to closing everything.
-                            foreach (i; lowfd .. maxDescriptors)
+                            // NOTE: malloc() and getrlimit() are not on the POSIX async
+                            // signal safe functions list, but practically this should
+                            // not be a problem. Java VM and CPython also use malloc()
+                            // in its own implementation via opendir().
+                            import core.stdc.stdlib : malloc;
+                            import core.sys.posix.poll : pollfd, poll, POLLNVAL;
+                            import core.sys.posix.sys.resource : rlimit, getrlimit, RLIMIT_NOFILE;
+
+                            // Get the maximum number of file descriptors that could be open.
+                            rlimit r;
+                            if (getrlimit(RLIMIT_NOFILE, &r) != 0)
                             {
-                                close(i);
+                                abortOnError(forkPipeOut, InternalError.getrlimit, .errno);
+                            }
+                            immutable maxDescriptors = cast(int) r.rlim_cur;
+                            immutable maxToClose = maxDescriptors - lowfd;
+
+                            // Call poll() to see which ones are actually open:
+                            auto pfds = cast(pollfd*) malloc(pollfd.sizeof * maxToClose);
+                            if (pfds is null)
+                            {
+                                abortOnError(forkPipeOut, InternalError.malloc, .errno);
+                            }
+                            foreach (i; 0 .. maxToClose)
+                            {
+                                pfds[i].fd = i + lowfd;
+                                pfds[i].events = 0;
+                                pfds[i].revents = 0;
+                            }
+                            if (poll(pfds, maxToClose, 0) >= 0)
+                            {
+                                foreach (i; 0 .. maxToClose)
+                                {
+                                    // POLLNVAL will be set if the file descriptor is invalid.
+                                    if (!(pfds[i].revents & POLLNVAL)) close(pfds[i].fd);
+                                }
+                            }
+                            else
+                            {
+                                // Fall back to closing everything.
+                                foreach (i; lowfd .. maxDescriptors)
+                                {
+                                    close(i);
+                                }
                             }
                         }
                     }
