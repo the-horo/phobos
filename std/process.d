@@ -1041,6 +1041,15 @@ private Pid spawnProcessPosix(scope const(char[])[] args,
             setCLOEXEC(STDOUT_FILENO, false);
             setCLOEXEC(STDERR_FILENO, false);
 
+            import core.sys.posix.sys.resource : rlimit, getrlimit, RLIMIT_NOFILE;
+
+            // Get the maximum number of file descriptors that could be open.
+            rlimit r;
+            if (getrlimit(RLIMIT_NOFILE, &r) != 0)
+                abortOnError(forkPipeOut, InternalError.getrlimit, .errno);
+
+            immutable maxDescriptors = cast(int) r.rlim_cur;
+
             if (!(config.flags & Config.Flags.inheritFDs))
             {
                 version (FreeBSD)
@@ -1051,7 +1060,6 @@ private Pid spawnProcessPosix(scope const(char[])[] args,
                 static if (!__traits(compiles, closefrom))
                 {
                     void fallback (int lowfd) {
-                        import core.sys.posix.sys.resource : rlimit, getrlimit, RLIMIT_NOFILE;
                         import core.sys.posix.dirent : dirent, opendir, readdir, closedir, DIR;
                         import core.sys.posix.unistd : close;
                         import core.sys.posix.stdlib : atoi, malloc, free;
@@ -1060,15 +1068,10 @@ private Pid spawnProcessPosix(scope const(char[])[] args,
                         pragma(mangle, "dirfd")
                         extern(C) nothrow @nogc int dirfd(DIR* dir);
 
-                        // Get the maximum number of file descriptors that could be open.
-                        rlimit r;
-                        if (getrlimit(RLIMIT_NOFILE, &r) != 0)
-                            abortOnError(forkPipeOut, InternalError.getrlimit, .errno);
-
                         DIR* dir = null;
 
                         // We read from /dev/fd or /proc/self/fd only if the limit is high enough
-                        if (r.rlim_cur > 128*1024)
+                        if (maxDescriptors > 128*1024)
                         {
                             // Try to open the directory /dev/fd or /proc/self/fd
                             dir = opendir("/dev/fd");
@@ -1097,8 +1100,9 @@ private Pid spawnProcessPosix(scope const(char[])[] args,
                         else
                         {
                             bool fallback = true;
+
                             // This is going to allocate 8 bytes for each possible file descriptor from 3 to r.rlim_cur
-                            if (r.rlim_cur <= 128*1024)
+                            if (maxDescriptors <= 128*1024)
                             {
                                 // NOTE: malloc() and getrlimit() are not on the POSIX async
                                 // signal safe functions list, but practically this should
@@ -1107,7 +1111,6 @@ private Pid spawnProcessPosix(scope const(char[])[] args,
                                 import core.stdc.stdlib : malloc;
                                 import core.sys.posix.poll : pollfd, poll, POLLNVAL;
 
-                                immutable maxDescriptors = cast(int) r.rlim_cur;
                                 immutable maxToClose = maxDescriptors - lowfd;
 
                                 // Call poll() to see which ones are actually open:
