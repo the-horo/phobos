@@ -1085,14 +1085,14 @@ private Pid spawnProcessPosix(scope const(char[])[] args,
                             int opendirfd = dirfd(dir);
 
                             // Iterate over all file descriptors
-                            while(true)
+                            while (true)
                             {
                                 dirent* entry = readdir(dir);
 
                                 if (entry is null) break;
                                 if (entry.d_name[0] == '.') continue;
 
-                                int fd = atoi(cast(char*)entry.d_name);
+                                int fd = atoi(cast(char*) entry.d_name);
 
                                 if (fd != opendirfd && fd >= lowfd) close(fd);
                             }
